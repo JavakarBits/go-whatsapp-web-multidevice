@@ -9,7 +9,7 @@ var (
 	AppVersion             = "v4.8.0"
 	AppPort                = "3000"
 	AppDebug               = false
-	AppOs                  = fmt.Sprintf("AldinoKemal")
+	AppOs                  = fmt.Sprintf("Windows")
 	AppPlatform            = waProto.DeviceProps_PlatformType(1)
 	AppBasicAuthCredential string
 
