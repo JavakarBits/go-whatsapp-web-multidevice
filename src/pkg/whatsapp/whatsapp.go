@@ -5,6 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"sync/atomic"
+	"time"
+
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/internal/websocket"
 	pkgError "github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/error"
@@ -19,13 +27,6 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
-	"mime"
-	"net/http"
-	"os"
-	"regexp"
-	"strings"
-	"sync/atomic"
-	"time"
 )
 
 var (
@@ -244,6 +245,14 @@ func handler(rawEvt interface{}) {
 		} else if evt.Type == events.ReceiptTypeDelivered {
 			log.Infof("%s was delivered to %s at %s", evt.MessageIDs[0], evt.SourceString(), evt.Timestamp)
 		}
+
+		if config.WhatsappWebhook != "" &&
+			!strings.Contains(evt.SourceString(), "broadcast") &&
+			!isFromMySelf(evt.SourceString()) {
+			if err := forwardReceiptsToWebhook(evt); err != nil {
+				logrus.Error("Failed forward to webhook", err)
+			}
+		}
 	case *events.Presence:
 		if evt.Unavailable {
 			if evt.LastSeen.IsZero() {
@@ -276,6 +285,37 @@ func handler(rawEvt interface{}) {
 	}
 }
 
+// forwardDlrsToWebhook is a helper function to forward event to webhook url - DLRS (Delivered, Read)
+func forwardReceiptsToWebhook(evt *events.Receipt) error {
+	logrus.Info("Forwarding receipts to webhook:", config.WhatsappWebhook)
+	client := &http.Client{Timeout: 10 * time.Second}
+	body := map[string]interface{}{
+		"message_id": evt.MessageIDs[0],
+		"event_type": evt.Type,
+		"event_time": evt.Timestamp.Format("2006-01-02 15:04:05"),
+		"to_mobile":  evt.Chat.User,
+	}
+
+	if evt.Type == events.ReceiptTypeDelivered {
+		body["event_type"] = "delivered"
+	}
+
+	postBody, err := json.Marshal(body)
+	if err != nil {
+		return pkgError.WebhookError(fmt.Sprintf("Failed to marshal body: %v", err))
+	}
+
+	req, err := http.NewRequest(http.MethodPost, config.WhatsappWebhook, bytes.NewBuffer(postBody))
+	if err != nil {
+		return pkgError.WebhookError(fmt.Sprintf("error when create http object %v", err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if _, err = client.Do(req); err != nil {
+		return pkgError.WebhookError(fmt.Sprintf("error when submit webhook %v", err))
+	}
+	return nil
+}
+
 // forwardToWebhook is a helper function to forward event to webhook url
 func forwardToWebhook(evt *events.Message) error {
 	logrus.Info("Forwarding event to webhook:", config.WhatsappWebhook)
@@ -293,7 +333,6 @@ func forwardToWebhook(evt *events.Message) error {
 		message.Text = extendedMessage
 	}
 
-	
 	var quotedmessage any
 	if evt.Message.ExtendedTextMessage != nil && evt.Message.ExtendedTextMessage.ContextInfo != nil {
 		if conversation := evt.Message.ExtendedTextMessage.ContextInfo.QuotedMessage.GetConversation(); conversation != "" {
@@ -315,6 +354,7 @@ func forwardToWebhook(evt *events.Message) error {
 	}
 
 	body := map[string]interface{}{
+		"event_type":     "message_in",
 		"audio":          audioMedia,
 		"contact":        evt.Message.GetContactMessage(),
 		"document":       documentMedia,
